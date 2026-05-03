@@ -30,13 +30,20 @@ SINGBOX_RELEASE_URL="${SINGBOX_RELEASE_URL:-https://github.com/SagerNet/sing-box
 DEFAULT_SNI_POOL=(
     "www.icloud.com"
     "gateway.icloud.com"
-    "www.bing.com"
-    "dl.google.com"
-    "addons.mozilla.org"
+    "appleid.apple.com"
     "www.microsoft.com"
+    "login.microsoftonline.com"
+    "office.com"
     "s0.awsstatic.com"
+    "d1.awsstatic.com"
+    "cdnjs.cloudflare.com"
+    "ajax.cloudflare.com"
+    "www.wikipedia.org"
+    "www.reddit.com"
+    "www.stackoverflow.com"
+    "api.github.com"
+    "objects.githubusercontent.com"
 )
-
 SHORT_ID="a1b2c3d4"
 
 info()   { echo -e "${CYAN}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
