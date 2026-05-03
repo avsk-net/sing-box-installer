@@ -1,57 +1,10 @@
 #!/bin/bash
-# =============================================================================
-#  singbox-installer.sh  (v6 — single-script, all-in-one)
-#
-#  One sing-box 1.11.0 installer that handles:
-#      vless-reality   (TCP, VLESS + Vision + Reality)
-#      vmess-ws        (TCP, VMess over WebSocket+TLS)
-#      trojan-ws       (TCP, Trojan over WebSocket+TLS)
-#      hysteria        (UDP, Hysteria v1 — legacy fallback)
-#      hysteria2       (UDP, Hysteria v2)
-#      shadowsocks     (TCP, Shadowsocks 2022 / 2022-blake3-aes-256-gcm)
-#
-#  After every install you get THREE files:
-#      Server config   /usr/local/etc/sing-box/config.json
-#      Master client   /etc/singbox/sing-box-client-master.txt
-#                      ↑ every protocol installed gets appended here as
-#                        an outbound, all wired into the urltest 'auto'
-#                        and selectable from 'proxy'. This is the file
-#                        you ship to your phone / multi-node clients.
-#      Per-install     /etc/singbox/sing-box-client-<protocol>-<port>.txt
-#                      ↑ a complete standalone client config containing
-#                        ONLY this one node — use it to test a single
-#                        inbound in isolation, or hand off to one user.
-#
-#  Subcommands:
-#      install <PROTOCOL> <PORT> [--sni DOMAIN]
-#      remove  <TAG>
-#      list
-#      show <TAG>                 print per-install client file for a tag
-#      show-master                print the master client file
-#      regen-uuid <TAG>           rotate UUID (vless/vmess) or password (others)
-#      regen-sni  <TAG> [--sni D] reassign SNI for vless-reality
-#      set-sni-pool d1,d2,d3,...
-#      show-sni-pool
-#      doctor
-#      service <start|stop|restart|status|logs>
-#      help
-#
-#  Examples:
-#      sudo bash singbox-installer.sh install vless-reality 443
-#      sudo bash singbox-installer.sh install hysteria2 443
-#      sudo bash singbox-installer.sh install vmess-ws 8443
-#      sudo bash singbox-installer.sh list
-#      sudo bash singbox-installer.sh show vless-reality-443
-#      sudo bash singbox-installer.sh show-master > my-phone-config.json
-# =============================================================================
 
 set -uo pipefail
 
-# ── Colours ─────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-# ── Paths ───────────────────────────────────────────────────────────────────
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_CONF_DIR="/usr/local/etc/sing-box"
 SINGBOX_CONF="$SINGBOX_CONF_DIR/config.json"
@@ -72,12 +25,8 @@ PINNED_VERSION="1.11.0"
 BUNDLED_TARBALL="/root/singbox_installer/sing-box-${PINNED_VERSION}-linux-amd64.tar.gz"
 EXTRACTED_SUBDIR="sing-box-${PINNED_VERSION}-linux-amd64"
 
-# Upstream release URL — can be overridden by env to use a mirror.
-# Example:
-#   SINGBOX_RELEASE_URL="https://my-mirror.example.com/sing-box/v1.11.0" bash $0 install ...
 SINGBOX_RELEASE_URL="${SINGBOX_RELEASE_URL:-https://github.com/SagerNet/sing-box/releases/download/v$PINNED_VERSION}"
 
-# ── SNI pool (override with: set-sni-pool ...) ──────────────────────────────
 DEFAULT_SNI_POOL=(
     "www.icloud.com"
     "gateway.icloud.com"
@@ -90,7 +39,6 @@ DEFAULT_SNI_POOL=(
 
 SHORT_ID="a1b2c3d4"
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
 info()   { echo -e "${CYAN}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
 ok()     { echo -e "${GREEN}[OK]${NC}    $*" | tee -a "$LOG_FILE"; }
 warn()   { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE"; }
@@ -157,7 +105,6 @@ ${BOLD}Examples:${NC}
 EOF
 }
 
-# ── Pre-flight ──────────────────────────────────────────────────────────────
 require_root() { [[ $EUID -ne 0 ]] && die "Run as root (sudo)."; }
 
 ensure_hostname_in_hosts() {
@@ -185,9 +132,6 @@ ensure_singbox() {
         warn "Found v$cur; replacing with pinned v$PINNED_VERSION"
     fi
 
-    # If the tarball is missing, fetch it from the official GitHub release.
-    # Verifies SHA256 against the matching .sha256 file in the same release,
-    # then extracts and installs.
     if [[ ! -f "$BUNDLED_TARBALL" ]]; then
         warn "Bundled tarball not found at $BUNDLED_TARBALL"
         info "Downloading sing-box v$PINNED_VERSION from official GitHub release..."
@@ -195,7 +139,6 @@ ensure_singbox() {
         mkdir -p "$(dirname "$BUNDLED_TARBALL")"
         local tarball_url="$SINGBOX_RELEASE_URL/sing-box-${PINNED_VERSION}-linux-amd64.tar.gz"
 
-        # Download tarball
         if ! curl -fsSL --max-time 120 -o "$BUNDLED_TARBALL" "$tarball_url" 2>>"$LOG_FILE"; then
             err "Download failed: $tarball_url"
             err "Check connectivity to github.com (or set SINGBOX_RELEASE_URL=<mirror>)"
@@ -203,10 +146,6 @@ ensure_singbox() {
         fi
         ok "Downloaded: $BUNDLED_TARBALL"
 
-        # Verify SHA256 — try in this order:
-        #   1. Hard-coded SINGBOX_SHA256 env var (most reliable, set by the user)
-        #   2. Matching .sha256 file from the same release URL
-        #   3. Skip verification with a loud warning (offline/mirror scenario)
         local computed
         computed=$(sha256sum "$BUNDLED_TARBALL" | awk '{print $1}')
         info "Computed SHA256: $computed"
@@ -218,11 +157,9 @@ ensure_singbox() {
             fi
             ok "SHA256 matches user-provided SINGBOX_SHA256 ✓"
         else
-            # Try fetching the official .sha256 file
             local sums_url="$SINGBOX_RELEASE_URL/sing-box-${PINNED_VERSION}-linux-amd64.tar.gz.sha256"
             local sums_file; sums_file=$(mktemp)
             if curl -fsSL --max-time 30 -o "$sums_file" "$sums_url" 2>>"$LOG_FILE"; then
-                # The .sha256 file is typically: "<hex>  <filename>"
                 local expected; expected=$(awk '{print $1}' "$sums_file" | head -1)
                 rm -f "$sums_file"
                 if [[ -n "$expected" && "$computed" == "$expected" ]]; then
@@ -241,7 +178,6 @@ ensure_singbox() {
         fi
     fi
 
-    # Extract and install
     local tmp; tmp=$(mktemp -d)
     if ! tar -xzf "$BUNDLED_TARBALL" -C "$tmp" 2>>"$LOG_FILE"; then
         rm -rf "$tmp"
@@ -265,7 +201,6 @@ detect_public_ip() {
     ok "Public IP: $PUBLIC_IP"
 }
 
-# ── SNI pool resolution + per-port assignment ───────────────────────────────
 get_sni_pool() {
     if [[ -s "$SNI_POOL_FILE" ]]; then
         awk 'NF && $1 !~ /^#/' "$SNI_POOL_FILE"
@@ -274,8 +209,6 @@ get_sni_pool() {
     fi
 }
 
-# Pick an SNI for a port: prefer one not already used by another inbound on
-# this host so each new install gets a different camouflage target.
 pick_sni_for_port() {
     local port="$1"
     local pool=()
@@ -308,7 +241,6 @@ save_port_sni() {
     chmod 600 "$STATE_DIR/sni-${port}.txt"
 }
 
-# ── Credentials ─────────────────────────────────────────────────────────────
 gen_uuid()       { "$SINGBOX_BIN" generate uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid; }
 gen_password()   { openssl rand -base64 24 | tr -d '\n=' | tr '/+' 'ab'; }
 gen_ss2022_key() { openssl rand -base64 32 | tr -d '\n'; }
@@ -342,7 +274,6 @@ ensure_reality_keypair() {
     [[ -z "$REALITY_PRIV" || -z "$REALITY_PUB" ]] && die "Corrupt keypair at $REALITY_KEY_FILE"
 }
 
-# Per-port secret store: same port reinstall = same UUID/password (idempotent)
 load_secret() {
     local kind="$1" port="$2"
     local f="$STATE_DIR/${kind}-${port}.secret"
@@ -364,7 +295,6 @@ regen_secret() {
     load_secret "$kind" "$port"
 }
 
-# ── Protocol → transport mapping ────────────────────────────────────────────
 protocol_transport() {
     case "$1" in
         vless-reality|vmess-ws|trojan-ws|shadowsocks) echo "tcp" ;;
@@ -373,7 +303,6 @@ protocol_transport() {
     esac
 }
 
-# Map sing-box's stored .type back to our protocol name (for collision check)
 inbound_type_to_protocol() {
     case "$1" in
         vless)        echo "vless-reality" ;;
@@ -386,15 +315,11 @@ inbound_type_to_protocol() {
     esac
 }
 
-# ── Port-collision check ────────────────────────────────────────────────────
-# Returns: sets IDEMPOTENT_RETRY=1 if same-tag inbound already exists.
-# Refuses install if a different inbound holds the port on the same transport.
 check_port_free() {
     local port="$1" transport="$2" our_tag="$3"
     IDEMPOTENT_RETRY=0
     local conflicts=()
 
-    # (a) existing sing-box inbound on the same transport+port
     if [[ -f "$SINGBOX_CONF" ]]; then
         while IFS='|' read -r ex_type ex_tag; do
             [[ -z "$ex_type" ]] && continue
@@ -413,7 +338,6 @@ check_port_free() {
         ' "$SINGBOX_CONF" 2>/dev/null)
     fi
 
-    # (b) kernel listener on the same transport+port (catches non-singbox processes)
     local ss_flag
     [[ "$transport" == "tcp" ]] && ss_flag="-tlnp" || ss_flag="-ulnp"
     if command -v ss >/dev/null; then
@@ -441,10 +365,6 @@ check_port_free() {
         ok "Port $port/$transport is free."
     fi
 }
-
-# =============================================================================
-# Inbound + Outbound builders (sets INBOUND_JSON, OUTBOUND_JSON, SUMMARY_LINES)
-# =============================================================================
 
 build_vless_reality() {
     local port="$1" tag="$2" sni_override="${3:-}"
@@ -637,9 +557,6 @@ dispatch_build() {
     esac
 }
 
-# =============================================================================
-# Server config: bootstrap + atomic upsert
-# =============================================================================
 bootstrap_server_config() {
     [[ -f "$SINGBOX_CONF" ]] && jq -e '.inbounds' "$SINGBOX_CONF" >/dev/null 2>&1 && return
     info "Bootstrapping fresh server config..."
@@ -672,9 +589,6 @@ upsert_server_inbound() {
     rm -f "$backup"
 }
 
-# =============================================================================
-# Master client config — bootstrap + upsert (full networklinkpro structure)
-# =============================================================================
 bootstrap_master_client() {
     [[ -f "$CLIENT_MASTER" ]] && return
     info "Bootstrapping master client config: $CLIENT_MASTER"
@@ -778,7 +692,6 @@ bootstrap_master_client() {
 CLIENTEOF
 }
 
-# Migrate legacy 1.10 TUN address fields if a previous installer left them.
 migrate_legacy_master() {
     [[ ! -f "$CLIENT_MASTER" ]] && return
     local has_legacy
@@ -850,12 +763,6 @@ upsert_master_outbound() {
     rm -f "$backup"
 }
 
-# =============================================================================
-# Per-install standalone client config
-# =============================================================================
-# Builds a complete single-node client manifest by reading the master config
-# (which has the right DNS/route/inbound structure) and replacing its outbounds
-# with the bare-minimum needed to use ONLY this one node. Validated before save.
 write_per_install_client() {
     local outbound_json="$1" tag="$2"
     local out="$CLIENT_DIR/sing-box-client-${tag}.txt"
@@ -863,9 +770,6 @@ write_per_install_client() {
     info "Writing per-install client: $out"
 
     local TMP; TMP=$(mktemp)
-    # Take the master, replace outbounds with a single-node setup.
-    # Selector and urltest still exist (so the app's UI works) but contain
-    # only the one node. Routing/DNS/TUN copied over identically.
     if ! jq --argjson ob "$outbound_json" --arg tag "$tag" '
         .outbounds = [
             { type: "selector", tag: "proxy",
@@ -885,7 +789,6 @@ write_per_install_client() {
         rm -f "$TMP"; die "jq render failed (per-install client)"
     fi
 
-    # Validate before committing
     if ! "$SINGBOX_BIN" check -c "$TMP" >>"$LOG_FILE" 2>&1; then
         local check_out
         check_out=$("$SINGBOX_BIN" check -c "$TMP" 2>&1)
@@ -899,9 +802,6 @@ write_per_install_client() {
     ok "Per-install client: $out"
 }
 
-# =============================================================================
-# systemd + firewall
-# =============================================================================
 install_systemd_unit() {
     if [[ -f "$SINGBOX_SERVICE" ]] && \
        grep -q "ExecStart=$SINGBOX_BIN run -c $SINGBOX_CONF" "$SINGBOX_SERVICE"; then
@@ -964,10 +864,6 @@ open_firewall_port() {
         warn "No active firewall — open $p/$t manually if needed."
     fi
 }
-
-# =============================================================================
-# Subcommands
-# =============================================================================
 
 cmd_install() {
     local protocol="${1:-}" port="${2:-}"
@@ -1051,7 +947,6 @@ cmd_remove() {
     n=$(jq --arg t "$tag" '[.inbounds[]? | select(.tag == $t)] | length' "$SINGBOX_CONF")
     [[ "$n" == "0" ]] && warn "Tag '$tag' not in server config (will still clean up client side)"
 
-    # Remove from server config
     if [[ "$n" != "0" ]]; then
         local backup="$SINGBOX_CONF.bak-$(date +%s)"; cp "$SINGBOX_CONF" "$backup"
         local TMP; TMP=$(mktemp)
@@ -1064,7 +959,6 @@ cmd_remove() {
         rm -f "$backup"
     fi
 
-    # Remove from master client
     if [[ -f "$CLIENT_MASTER" ]]; then
         local cb="$CLIENT_MASTER.bak-$(date +%s)"; cp "$CLIENT_MASTER" "$cb"
         local TMP; TMP=$(mktemp)
@@ -1083,7 +977,6 @@ cmd_remove() {
         rm -f "$cb"
     fi
 
-    # Remove per-install client + state
     rm -f "$CLIENT_DIR/sing-box-client-${tag}.txt"
     local port="${tag##*-}"
     if [[ "$port" =~ ^[0-9]+$ ]]; then
@@ -1306,12 +1199,10 @@ cmd_service() {
     esac
 }
 
-# ── Entry point ─────────────────────────────────────────────────────────────
 require_root
 mkdir -p "$STATE_DIR" "$CLIENT_DIR"
 touch "$LOG_FILE"
 
-# Backwards-compat: <protocol> <port> → install <protocol> <port>
 if [[ $# -ge 2 ]] && [[ "${1:-}" =~ ^(vless-reality|vmess-ws|trojan-ws|hysteria|hysteria2|shadowsocks)$ ]]; then
     set -- install "$@"
 fi
