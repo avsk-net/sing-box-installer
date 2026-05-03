@@ -28,7 +28,7 @@ EXTRACTED_SUBDIR="sing-box-${PINNED_VERSION}-linux-amd64"
 SINGBOX_RELEASE_URL="${SINGBOX_RELEASE_URL:-https://github.com/SagerNet/sing-box/releases/download/v$PINNED_VERSION}"
 
 DEFAULT_SNI_POOL=(
-    "www.icloud.com"
+     "www.icloud.com"
     "gateway.icloud.com"
     "appleid.apple.com"
     "www.microsoft.com"
@@ -44,6 +44,7 @@ DEFAULT_SNI_POOL=(
     "api.github.com"
     "objects.githubusercontent.com"
 )
+
 SHORT_ID="a1b2c3d4"
 
 info()   { echo -e "${CYAN}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
@@ -854,12 +855,31 @@ restart_service() {
 open_firewall_port() {
     local p="$1" t="$2"
     if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-        ufw allow "$p/$t" >>"$LOG_FILE" 2>&1; ok "ufw: $p/$t allowed"
+        ufw allow "$p/$t" >>"$LOG_FILE" 2>&1
+        ok "ufw: $p/$t allowed"
     elif command -v iptables &>/dev/null; then
-        iptables  -C INPUT -p "$t" --dport "$p" -j ACCEPT 2>/dev/null \
-            || iptables  -A INPUT -p "$t" --dport "$p" -j ACCEPT
-        ip6tables -C INPUT -p "$t" --dport "$p" -j ACCEPT 2>/dev/null \
-            || ip6tables -A INPUT -p "$t" --dport "$p" -j ACCEPT
+        if ! iptables -C INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT 2>/dev/null; then
+            local reject_line
+            reject_line=$(iptables -L INPUT --line-numbers -n 2>/dev/null \
+                | awk '/^[0-9]+[[:space:]]+(REJECT|DROP)/ {print $1}' | tail -1)
+            if [[ -n "$reject_line" ]]; then
+                iptables -I INPUT "$reject_line" -p "$t" -m "$t" --dport "$p" -j ACCEPT
+            else
+                iptables -A INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT
+            fi
+        fi
+        if command -v ip6tables &>/dev/null; then
+            if ! ip6tables -C INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT 2>/dev/null; then
+                local reject_line6
+                reject_line6=$(ip6tables -L INPUT --line-numbers -n 2>/dev/null \
+                    | awk '/^[0-9]+[[:space:]]+(REJECT|DROP)/ {print $1}' | tail -1)
+                if [[ -n "$reject_line6" ]]; then
+                    ip6tables -I INPUT "$reject_line6" -p "$t" -m "$t" --dport "$p" -j ACCEPT
+                else
+                    ip6tables -A INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT
+                fi
+            fi
+        fi
         [[ -e /etc/iptables/rules.v4 ]] && iptables-save  > /etc/iptables/rules.v4
         [[ -e /etc/iptables/rules.v6 ]] && ip6tables-save > /etc/iptables/rules.v6
         ok "iptables: $p/$t allowed"
@@ -868,7 +888,35 @@ open_firewall_port() {
         firewall-cmd --reload >>"$LOG_FILE" 2>&1
         ok "firewalld: $p/$t allowed"
     else
-        warn "No active firewall — open $p/$t manually if needed."
+        warn "No active firewall detected — open $p/$t manually if needed."
+    fi
+}
+
+close_firewall_port() {
+    local p="$1" t="$2"
+    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
+        ufw delete allow "$p/$t" >>"$LOG_FILE" 2>&1
+        ok "ufw: $p/$t closed"
+    elif command -v iptables &>/dev/null; then
+        if iptables -C INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT 2>/dev/null; then
+            iptables -D INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT
+            ok "iptables: $p/$t removed"
+        else
+            info "iptables: no rule found for $p/$t — nothing to remove"
+        fi
+        if command -v ip6tables &>/dev/null; then
+            if ip6tables -C INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT 2>/dev/null; then
+                ip6tables -D INPUT -p "$t" -m "$t" --dport "$p" -j ACCEPT
+            fi
+        fi
+        [[ -e /etc/iptables/rules.v4 ]] && iptables-save  > /etc/iptables/rules.v4
+        [[ -e /etc/iptables/rules.v6 ]] && ip6tables-save > /etc/iptables/rules.v6
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state 2>/dev/null | grep -q running; then
+        firewall-cmd --zone=public --remove-port="$p/$t" --permanent >>"$LOG_FILE" 2>&1
+        firewall-cmd --reload >>"$LOG_FILE" 2>&1
+        ok "firewalld: $p/$t closed"
+    else
+        warn "No active firewall detected — close $p/$t manually if needed."
     fi
 }
 
@@ -986,6 +1034,8 @@ cmd_remove() {
 
     rm -f "$CLIENT_DIR/sing-box-client-${tag}.txt"
     local port="${tag##*-}"
+    local proto="${tag%-*}"
+    local transport; transport=$(protocol_transport "$proto" 2>/dev/null || echo "")
     if [[ "$port" =~ ^[0-9]+$ ]]; then
         rm -f "$STATE_DIR/uuid-${port}.secret" \
               "$STATE_DIR/password-${port}.secret" \
@@ -996,7 +1046,8 @@ cmd_remove() {
     fi
 
     systemctl restart sing-box || true
-    ok "Removed '$tag' (server + master client + per-install client + secrets)"
+    [[ -n "$transport" && "$port" =~ ^[0-9]+$ ]] && close_firewall_port "$port" "$transport"
+    ok "Removed '$tag' (server + master client + per-install client + secrets + firewall)"
 }
 
 cmd_list() {
